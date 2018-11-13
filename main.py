@@ -6,19 +6,21 @@ import argparse
 MAX_GENERATIONS = 100
 GENERATION_SIZE = 100
 INIT_POP_AVERAGE_TRIANGLES = 5
+PROB_DEL_TRI = 0.50  # chance any triangle is deleted
+PROB_ADD_TRI = 0.50  # change a random triangle is added
+GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.25)
 np.random.seed(908759798)
 
 # A Pop is a list of Triangles
 # A Triangle is a tuple of two arrays, the first it's three coordinates and the second its RGBA color
 
 
+def randomly_generate_triangle(resolution):
+    return np.uint32(np.random.rand(3, 2) * resolution), np.uint8(np.random.rand(4) * 256)
+
+
 def randomly_generate_pop(triangles, resolution):
-    return [
-        (
-            np.uint32(np.random.rand(3, 2) * resolution),
-            np.uint8(np.random.rand(4) * 256)
-        ) for _ in range(triangles)
-    ]
+    return [randomly_generate_triangle(resolution) for _ in range(triangles)]
 
 
 def randomly_generate_population(pop_size, avg_triangles, resolution):
@@ -78,11 +80,51 @@ def calculate_population_fitness(image, population):
     ]
 
 
-def main(photo, output, target_loss=0.05, save_intermediate=False):
-    image = imageio.imread(sys.argv[0])
-    population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, image.shape[:1])
-    fitness = calculate_population_fitness(image, population)
-    # sort population by fitness, drop lowest % and then mutate and breed the remaining
+def copy_pop(pop):
+    return [(points.copy(), color.copy()) for (points, color) in pop]
+
+
+def mutate_pop(pop, resolution):
+    # Two types of mutation 1) remove a triangle, 2) add a triangle
+    while len(pop) > 1 and np.random.rand() < PROB_DEL_TRI:
+        del pop[np.random.randint(len(pop))]
+
+    while np.random.rand() < PROB_ADD_TRI:
+        pop.append(randomly_generate_triangle())
+
+
+def train(image, target_loss=1.0, intermediate_path=None):
+    resolution = image.shape[:1]
+    population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
+    generation = 0
+    while True:
+        fitness = calculate_population_fitness(image, population)
+        fitness, population = zip(*sorted(zip(fitness, population)))  # sort by fitness
+
+        # check if we have reached our target_loss
+        if generation >= MAX_GENERATIONS:
+            break  # Not an optimal solution, but we have to stop somewhere
+        elif 1 / np.array(fitness).max() <= target_loss:
+            break
+
+        # drop the lowest pops
+        population = population[:GENERATION_CARRYOVER]
+
+        # duplicate the top members to fill the gap
+        n_babies = GENERATION_SIZE - GENERATION_CARRYOVER
+        for i in range(n_babies):
+            population.append(copy_pop(population[i]))
+
+        # randomly mutate all individuals
+        for i in range(GENERATION_SIZE):
+            mutate_pop(population[i], resolution)
+
+    return population[0], fitness[0], generation
+
+def main(photo, output, target_loss=1.0, save_intermediate=False):
+    image = imageio.imread(photo)
+    pop, fitness, generation = train(photo, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
+    imageio.imwrite('{}/final.png'.format(output), calculate_image(pop, image.shape[:1]))
 
 
 if __name__ == '__main__':
