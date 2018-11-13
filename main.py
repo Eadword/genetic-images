@@ -3,8 +3,8 @@ import numpy as np
 import sys
 import argparse
 
-MAX_GENERATIONS = 100
-GENERATION_SIZE = 100
+MAX_GENERATIONS = 10
+GENERATION_SIZE = 40
 INIT_POP_AVERAGE_TRIANGLES = 5
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
 PROB_ADD_TRI = 0.50  # change a random triangle is added
@@ -34,11 +34,12 @@ def randomly_generate_population(pop_size, avg_triangles, resolution):
 
 
 def calculate_loss(a, b):
-    return np.sum(np.sqrt(a.astype(np.float64)**2 - b.astype(np.float64)**2))
+    return np.sum(np.sqrt((np.float64(a) - np.float64(b))**2))
 
 
 def in_triangle(coords, loc):
     # http://blackpawn.com/texts/pointinpoly/
+    coords = np.int64(coords)
     v0 = coords[2] - coords[0]
     v1 = coords[1] - coords[0]
     v2 = loc - coords[0]
@@ -75,7 +76,7 @@ def calculate_image(pop, resolution):
 
 def calculate_population_fitness(image, population):
     return [
-        1 / calculate_loss(image, calculate_image(pop, image.shape[:1]))
+        1 / calculate_loss(image, calculate_image(pop, image.shape[:2]))
         for pop in population
     ]
 
@@ -90,21 +91,31 @@ def mutate_pop(pop, resolution):
         del pop[np.random.randint(len(pop))]
 
     while np.random.rand() < PROB_ADD_TRI:
-        pop.append(randomly_generate_triangle())
+        pop.append(randomly_generate_triangle(resolution))
+
+
+def sort_two_lists(a, b):
+    assert len(a) == len(b)
+    indexes = list(range(len(a)))
+    indexes.sort(key=a.__getitem__, reverse=True)
+    return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
 
 
 def train(image, target_loss=1.0, intermediate_path=None):
-    resolution = image.shape[:1]
+    resolution = image.shape[:2]
     population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
     generation = 0
     while True:
         fitness = calculate_population_fitness(image, population)
-        fitness, population = zip(*sorted(zip(fitness, population)))  # sort by fitness
+        fitness, population = sort_two_lists(fitness, population)
+        population = list(population)
+        fitness = np.array(fitness)
+        print("Gen {}; Best: {}; Mean: {}; Median: {}; SDEV: {}.".format(generation, fitness[0], fitness.mean(), fitness[GENERATION_SIZE//2], fitness.std()))
 
         # check if we have reached our target_loss
         if generation >= MAX_GENERATIONS:
             break  # Not an optimal solution, but we have to stop somewhere
-        elif 1 / np.array(fitness).max() <= target_loss:
+        elif 1 / fitness.max() <= target_loss:
             break
 
         # drop the lowest pops
@@ -119,12 +130,15 @@ def train(image, target_loss=1.0, intermediate_path=None):
         for i in range(GENERATION_SIZE):
             mutate_pop(population[i], resolution)
 
+        generation+=1
+
     return population[0], fitness[0], generation
+
 
 def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
-    pop, fitness, generation = train(photo, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
-    imageio.imwrite('{}/final.png'.format(output), calculate_image(pop, image.shape[:1]))
+    pop, fitness, generation = train(image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
+    imageio.imwrite('{}/final.png'.format(output), calculate_image(pop, image.shape[:2]))
 
 
 if __name__ == '__main__':
@@ -132,4 +146,4 @@ if __name__ == '__main__':
     # parser.add_argument("source", metavar='src', type=str, help="source image")
     # parser.add_argument("output", metavar='dst', type=str, help="output destination")
     # parser.add_argument()
-    main(sys.argv[0], sys.argv[1], int(sys.argv[2]), sys.argv[3])
+    main(sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4] in ['True', 'False'])
