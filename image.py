@@ -2,10 +2,16 @@ import numpy as np
 import tensorflow as tf
 
 
-# canvas = tf.placeholder(np.uint8, shape=(img_res_x, img_res_y, 3))
-triangle_coordinates = tf.placeholder(np.int32, shape=(3, 2))
-triangle_color = tf.placeholder(np.uint8, shape=(4,))
-locations_to_check = tf.placeholder(np.int32, shape=(None, 2))
+def init_tensors(resolution):
+    global canvas, triangle_coordinates, triangle_color, locations_to_check
+    canvas = tf.placeholder(np.uint8, shape=(resolution[0], resolution[1], 3))
+    triangle_coordinates = tf.placeholder(np.int32, shape=(3, 2))
+    triangle_color = tf.placeholder(np.uint8, shape=(4,))
+    locations_to_check = tf.placeholder(np.int32, shape=(None, 2))
+
+    global within_tensor, outside_tensor
+    within_tensor = _in_triangle_tensor()
+    outside_tensor = tf.logical_not(within_tensor)  # need inverse for numpy masking
 
 
 def in_triangle(coords, loc):
@@ -46,7 +52,30 @@ def calculate_image(pop, resolution):
     return im
 
 
-def in_triangle_tensor():
+def calculate_image_with_tensors(tfsess, pop, resolution):
+    im = np.zeros((resolution[0], resolution[1], 3), dtype=np.uint8)
+
+    for (t_coords, t_color) in pop:
+        min_x = t_coords[:, 0].min()
+        min_y = t_coords[:, 1].min()
+        max_x = t_coords[:, 0].max()
+        max_y = t_coords[:, 1].max()
+
+        locations = np.indices((max_x-min_x,max_y-min_y), dtype=np.int32).swapaxes(0,1).swapaxes(1,2).reshape(-1,2) + [min_x, min_y]
+        outside = tfsess.run(outside_tensor, feed_dict={triangle_coordinates: t_coords, locations_to_check: locations})
+        locations = np.ma.array(locations, mask=np.column_stack((outside, outside))).compressed().reshape(-1,2)
+        x_cords = locations[:,0]
+        y_cords = locations[:,1]
+
+        src_a = np.float64(t_color[3]) / 255
+        src_c = t_color
+
+        im[x_cords, y_cords] = src_a * src_c[:3] + im[x_cords, y_cords] * (1.0 - src_a)
+
+    return im
+
+
+def _in_triangle_tensor():
     coords = triangle_coordinates
     locs = locations_to_check
 
@@ -70,14 +99,7 @@ def in_triangle_tensor():
     return within
 
 
-# let them be constant so we don't have to remake them every time
-within_tensor = in_triangle_tensor()
-outside_tensor = tf.logical_not(within_tensor)  # need inverse for numpy masking
-
-
 # def _image_calculation_tensor():
-#     x_res = img_res_x
-#     y_res = img_res_y
 #     t_coords = triangle_coordinates
 #     t_color = triangle_color
 #     image = canvas
@@ -92,28 +114,3 @@ outside_tensor = tf.logical_not(within_tensor)  # need inverse for numpy masking
 #     locations = tf.transpose(tf.stack([x_locations, y_locations], axis=0))
 #     locations_to_check
 #     outside = outside_tensor
-
-
-
-
-def calculate_image_with_tensors(tfsess, pop, resolution):
-    im = np.zeros((resolution[0], resolution[1], 3), dtype=np.uint8)
-
-    for (t_coords, t_color) in pop:
-        min_x = t_coords[:, 0].min()
-        min_y = t_coords[:, 1].min()
-        max_x = t_coords[:, 0].max()
-        max_y = t_coords[:, 1].max()
-
-        locations = np.indices((max_x-min_x,max_y-min_y), dtype=np.int32).swapaxes(0,1).swapaxes(1,2).reshape(-1,2) + [min_x, min_y]
-        outside = tfsess.run(outside_tensor, feed_dict={triangle_coordinates: t_coords, locations_to_check: locations})
-        locations = np.ma.array(locations, mask=np.column_stack((outside, outside))).compressed().reshape(-1,2)
-        x_cords = locations[:,0]
-        y_cords = locations[:,1]
-
-        src_a = np.float64(t_color[3]) / 255
-        src_c = t_color
-
-        im[x_cords, y_cords] = src_a * src_c[:3] + im[x_cords, y_cords] * (1.0 - src_a)
-
-    return im
