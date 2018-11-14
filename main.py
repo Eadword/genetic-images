@@ -1,10 +1,14 @@
-import imageio
+from image import calculate_image_with_tensors
+
 import numpy as np
+import tensorflow as tf
+
+import imageio
 import sys
 import argparse
 
 MAX_GENERATIONS = 10
-GENERATION_SIZE = 40
+GENERATION_SIZE = 80
 INIT_POP_AVERAGE_TRIANGLES = 5
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
 PROB_ADD_TRI = 0.50  # change a random triangle is added
@@ -37,46 +41,9 @@ def calculate_loss(a, b):
     return np.sum(np.sqrt((np.float64(a) - np.float64(b))**2))
 
 
-def in_triangle(coords, loc):
-    # http://blackpawn.com/texts/pointinpoly/
-    coords = np.int64(coords)
-    v0 = coords[2] - coords[0]
-    v1 = coords[1] - coords[0]
-    v2 = loc - coords[0]
-    dot00 = np.dot(v0, v0)
-    dot01 = np.dot(v0, v1)
-    dot02 = np.dot(v0, v2)
-    dot11 = np.dot(v1, v1)
-    dot12 = np.dot(v1, v2)
-    inv_denom = 1 / np.float64(dot00 * dot11 - dot01 * dot01)
-    u = np.float64(dot11 * dot02 - dot01 * dot12) * inv_denom
-    v = np.float64(dot00 * dot12 - dot01 * dot02) * inv_denom
-    return (u >= 0) and (v >= 0) and (u + v < 1)
-
-
-def calculate_image(pop, resolution):
-    im = np.zeros((resolution[0], resolution[1], 3), dtype=np.uint8)
-    for (t_coords, t_color) in pop:
-        min_x = t_coords[:,:1].min()
-        min_y = t_coords[:,1:].min()
-        max_x = t_coords[:,:1].max()
-        max_y = t_coords[:,1:].max()
-
-        for x in range(min_x, max_x+1):
-            for y in range(min_y, max_y+1):
-                if not in_triangle(t_coords, np.array([x, y])):
-                    continue
-
-                # https://en.wikipedia.org/wiki/Alpha_compositing#Examples
-                # simplified because the destination alpha is always 1
-                src_a = np.float64(t_color[3]) / 255
-                im[x,y] = src_a * t_color[:3] + (1.0 - src_a) * im[x,y,:3]
-    return im
-
-
-def calculate_population_fitness(image, population):
+def calculate_population_fitness(tfsess, image, population):
     return [
-        1 / calculate_loss(image, calculate_image(pop, image.shape[:2]))
+        1 / calculate_loss(image, calculate_image_with_tensors(tfsess, pop, image.shape[:2]))
         for pop in population
     ]
 
@@ -101,12 +68,12 @@ def sort_two_lists(a, b):
     return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
 
 
-def train(image, target_loss=1.0, intermediate_path=None):
+def train(tfsess, image, target_loss=1.0, intermediate_path=None):
     resolution = image.shape[:2]
     population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
     generation = 0
     while True:
-        fitness = calculate_population_fitness(image, population)
+        fitness = calculate_population_fitness(tfsess, image, population)
         fitness, population = sort_two_lists(fitness, population)
         population = list(population)
         fitness = np.array(fitness)
@@ -137,8 +104,9 @@ def train(image, target_loss=1.0, intermediate_path=None):
 
 def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
-    pop, fitness, generation = train(image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
-    imageio.imwrite('{}/final.png'.format(output), calculate_image(pop, image.shape[:2]))
+    with tf.Session() as sess:
+        pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
+        imageio.imwrite('{}/final.png'.format(output), calculate_image_with_tensors(sess, pop, image.shape[:2]))
 
 
 if __name__ == '__main__':
