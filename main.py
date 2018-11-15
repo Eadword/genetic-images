@@ -1,4 +1,5 @@
 from image import calculate_image_with_tensors
+import image as imglib
 
 import numpy as np
 import tensorflow as tf
@@ -7,7 +8,7 @@ import imageio
 import sys
 import argparse
 
-MAX_GENERATIONS = 10
+MAX_GENERATIONS = 30
 GENERATION_SIZE = 80
 INIT_POP_AVERAGE_TRIANGLES = 5
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
@@ -104,9 +105,11 @@ def train(tfsess, image, target_loss=1.0, intermediate_path=None):
 
 def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
+    resolution = image.shape[:2]
     with tf.Session() as sess:
+        imglib.init_tensors(resolution)
         pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
-        imageio.imwrite('{}/final.png'.format(output), calculate_image_with_tensors(sess, pop, image.shape[:2]))
+        imageio.imwrite('{}/final.png'.format(output), calculate_image_with_tensors(sess, pop, resolution))
 
 
 if __name__ == '__main__':
