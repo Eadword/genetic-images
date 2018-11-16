@@ -109,7 +109,7 @@ def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
     resolution = image.shape[:2]
 
-    renderer = Renderer(resolution, hidden=False)
+    renderer = Renderer((800,600), hidden=False)
     for n in range(1000):
         renderer.draw()
         if n % 100 == 0:

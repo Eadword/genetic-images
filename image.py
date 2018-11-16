@@ -26,6 +26,7 @@ def in_triangle(coords, loc):
 
 
 if METHOD == 'TF':
+    # TODO: re-write to go for each pixel instead of for each triangle
     def calculate_image(tfsess, pop):
         tfsess.run(canvas.initializer)
         for (t_coords, t_color) in pop:
@@ -36,6 +37,7 @@ elif METHOD == 'GL':
         pass
 
 else:
+    # TODO: re-write to go for each pixel instead of for each triangle
     def calculate_image(pop, resolution):
         im = np.zeros((resolution[0], resolution[1], 3), dtype=np.uint8)
         for (t_coords, t_color) in pop:
