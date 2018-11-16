@@ -1,9 +1,11 @@
 import numpy as np
 
-METHOD = 'TF'
+METHOD = 'GL'
 
 if METHOD == 'TF':
     import tensorflow as tf
+elif METHOD == 'GL':
+    import render
 
 
 def in_triangle(coords, loc):
@@ -29,6 +31,10 @@ if METHOD == 'TF':
         for (t_coords, t_color) in pop:
             tfsess.run(paint_canvas.op, feed_dict={triangle_coordinates: t_coords, triangle_color: t_color})
         return tfsess.run(canvas.read_value())
+elif METHOD == 'GL':
+    def calculate_image(pop, resolution):
+        pass
+
 else:
     def calculate_image(pop, resolution):
         im = np.zeros((resolution[0], resolution[1], 3), dtype=np.uint8)

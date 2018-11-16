@@ -1,5 +1,7 @@
 from image import calculate_image
 import image as imglib
+from render import Renderer
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -44,7 +46,7 @@ def calculate_loss(a, b):
 
 def calculate_population_fitness(tfsess, image, population):
     return [
-        1 / calculate_loss(image, calculate_image(tfsess, pop))
+        1 / calculate_loss(image, calculate_image(pop, image.shape[:2]))
         for pop in population
     ]
 
@@ -106,10 +108,17 @@ def train(tfsess, image, target_loss=1.0, intermediate_path=None):
 def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
     resolution = image.shape[:2]
-    with tf.Session() as sess:
-        imglib.init_tensors(resolution)
-        pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
-        imageio.imwrite('{}/final.png'.format(output), calculate_image(sess, pop))
+
+    renderer = Renderer(resolution, hidden=False)
+    for n in range(1000):
+        renderer.draw()
+        if n % 100 == 0:
+            print(n)
+        time.sleep(0.001)
+
+    # with tf.Session() as sess:
+    #     pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
+    #     imageio.imwrite('{}/final.png'.format(output), calculate_image(sess, pop))
 
 
 if __name__ == '__main__':
