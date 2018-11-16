@@ -11,7 +11,7 @@ vertex_data = np.array([[200, 40], [100, 300], [800, 500],
                         [700, 40], [200, 500], [700, 500]], dtype=np.int32)
 
 color_data = np.array([[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255],
-                       [0, 255, 0, 255], [0, 255, 0, 255], [0, 255, 0, 255]], dtype=np.uint8)
+                       [0, 255, 0, 255], [0, 255, 0, 80], [0, 255, 0, 80]], dtype=np.uint8)
 
 
 class Renderer:
@@ -50,7 +50,10 @@ class Renderer:
         if hidden:
             glfw.hide_window(self.window)
 
-        glClearColor(0, 0, 0.4, 1)
+        glClearColor(0, 0, 0, 1)
+        glDepthMask(False)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         with open("shaders/vertex.glsl") as vs:
             vertex_shader = shaders.compileShader(vs.read(), GL_VERTEX_SHADER)
@@ -71,7 +74,7 @@ class Renderer:
         _INSTANCE = None
 
     def draw(self):
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glClear(GL_COLOR_BUFFER_BIT)
 
         with self.shader:
             glBindVertexArray(self.vao_id)
