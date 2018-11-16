@@ -5,15 +5,8 @@ from OpenGL.GL import shaders
 
 import glfw
 import numpy as np
-import os
 
 _INSTANCE = None
-
-vertex_data = np.array([[200, 40], [100, 300], [800, 500],
-                        [700, 40], [200, 500], [700, 500]], dtype=np.int32)
-
-color_data = np.array([[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255],
-                       [0, 255, 0, 255], [0, 255, 0, 80], [0, 255, 0, 80]], dtype=np.uint8)
 
 
 class Renderer:
@@ -36,15 +29,20 @@ class Renderer:
 
         self.hidden = hidden
         self.resolution = resolution
+        self.vao_id = 0
+        self.vert_vbo_id = 0
+        self.color_vbo_id = 0
         self.vertex_buffer = None
         self.color_buffer = None
         self.frame_buffer = None
         self.result_texture = None
+        self.n_verts = 0
 
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, True)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+        glfw.window_hint(glfw.RESIZABLE, False)
 
         self.window = glfw.create_window(resolution[0], resolution[1], "Renderer", None, None)
         if not self.window:
@@ -62,33 +60,54 @@ class Renderer:
             vertex_shader = shaders.compileShader(vs.read(), GL_VERTEX_SHADER)
         with open("shaders/fragment.glsl") as fs:
             fragment_shader = shaders.compileShader(fs.read(), GL_FRAGMENT_SHADER)
-        self.shader = shaders.compileProgram(vertex_shader, fragment_shader)
-        with self.shader:
-            uloc = glGetUniformLocation(self.shader, 'screen_to_standard_transform')
-            T = self._screen_to_standard_transform()
+        self.program = shaders.compileProgram(vertex_shader, fragment_shader)
+        with self.program:
+            uloc = glGetUniformLocation(self.program, 'screen_to_standard_transform')
+            T = self._screen_to_clip()
             glUniformMatrix3fv(uloc, 1, True, T)
 
-        self.vao_id = self._get_triangle_vao()
+        self.vao_id = self._init_vao()
 
     def __del__(self):
         global _INSTANCE
-
-        glDeleteFramebuffers(self.frame_buffer)
-        glDeleteRenderbuffers(self.result_texture)
+        # TODO: not sure if we can make a clean destructor, especially if python is shutting down
+        # Come back to this if we are going to actually start and stop it
+        # glDeleteVertexArrays(1, self.vao_id)
+        # glDeleteBuffers(2, [self.vert_vbo_id, self.color_vbo_id])
+        # glDeleteFramebuffers(self.frame_buffer)
+        # glDeleteTextures(self.result_texture)
+        # glDeleteProgram(self.program)
         glfw.terminate()
 
         _INSTANCE = None
 
+    def data(self, vertices, colors):
+        vertices = np.ascontiguousarray(vertices, dtype=np.int32)
+        colors = np.ascontiguousarray(colors, dtype=np.uint8)
+
+        glBindVertexArray(self.vao_id)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vert_vbo_id)
+        glBufferData(GL_ARRAY_BUFFER, vertices, GL_STREAM_DRAW)
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.color_vbo_id)
+        glBufferData(GL_ARRAY_BUFFER, colors, GL_STREAM_DRAW)
+
+        # there we unbind current buffer and vertex array object
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glBindVertexArray(0)
+
+        self.n_verts = vertices.size // 2
+
     def render(self, gen_image=True):
         image = None
 
-        glUseProgram(self.shader)
+        glUseProgram(self.program)
         glBindVertexArray(self.vao_id)
 
         if gen_image:
             glBindFramebuffer(GL_FRAMEBUFFER, self.frame_buffer)
             glClear(GL_COLOR_BUFFER_BIT)
-            glDrawArrays(GL_TRIANGLES, 0, vertex_data.shape[0])
+            glDrawArrays(GL_TRIANGLES, 0, self.n_verts)
             glReadBuffer(GL_COLOR_ATTACHMENT0)
             image = glReadPixels(0,0,self.resolution[0], self.resolution[1],GL_RGB, GL_UNSIGNED_BYTE)
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
@@ -98,7 +117,7 @@ class Renderer:
 
         if not self.hidden:
             glClear(GL_COLOR_BUFFER_BIT)
-            glDrawArrays(GL_TRIANGLES, 0, vertex_data.shape[0])
+            glDrawArrays(GL_TRIANGLES, 0, self.n_verts)
             glfw.swap_buffers(self.window)
 
         glUseProgram(0)
@@ -107,22 +126,20 @@ class Renderer:
 
         return image
 
-    def _get_triangle_vao(self):
+    def _init_vao(self):
         # it is a container for buffers
         vao_id = glGenVertexArrays(1)
 
         glBindVertexArray(vao_id)
-        vbo_id = glGenBuffers(2)
+        self.vert_vbo_id, self.color_vbo_id = glGenBuffers(2)
 
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_id[0])
-        glBufferData(GL_ARRAY_BUFFER, vertex_data, GL_STATIC_DRAW)
-        glVertexAttribPointer(glGetAttribLocation(self.shader, 'vin_position'), 2, GL_INT, False, 0, None)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vert_vbo_id)
+        glVertexAttribPointer(glGetAttribLocation(self.program, 'vin_position'), 2, GL_INT, False, 0, None)
         glEnableVertexAttribArray(0)
 
         # repeat it for colors.
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_id[1])
-        glBufferData(GL_ARRAY_BUFFER, color_data, GL_STATIC_DRAW)
-        glVertexAttribPointer(glGetAttribLocation(self.shader, 'vin_color'), 4, GL_UNSIGNED_BYTE, False, 0, None)
+        glBindBuffer(GL_ARRAY_BUFFER, self.color_vbo_id)
+        glVertexAttribPointer(glGetAttribLocation(self.program, 'vin_color'), 4, GL_UNSIGNED_BYTE, False, 0, None)
         glEnableVertexAttribArray(1)
 
         # there we unbind current buffer and vertex array object
@@ -152,7 +169,7 @@ class Renderer:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-    def _screen_to_standard_transform(self):
+    def _screen_to_clip(self):
         """
         Transform from the 0,0 at top left going from (0 <= x =< xmax) and (0 <= y =< ymax)
         to (0,0) in the center going from (-1 =< x =< 1) and (0 =< y =< 1).
