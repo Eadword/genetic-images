@@ -1,3 +1,5 @@
+# https://learnopengl.com/Advanced-OpenGL/Framebuffers
+
 from OpenGL.GL import *
 from OpenGL.GL import shaders
 
@@ -32,9 +34,12 @@ class Renderer:
         if not glfw.init():
             raise RuntimeError("Failed to initialize GLFW.")
 
+        self.hidden = hidden
         self.resolution = resolution
         self.vertex_buffer = None
         self.color_buffer = None
+        self.frame_buffer = None
+        self.result_texture = None
 
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
@@ -50,10 +55,8 @@ class Renderer:
         if hidden:
             glfw.hide_window(self.window)
 
-        glClearColor(0, 0, 0, 1)
-        glDepthMask(False)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        self._init_alpha()
+        self._init_frame_buffer_objects()
 
         with open("shaders/vertex.glsl") as vs:
             vertex_shader = shaders.compileShader(vs.read(), GL_VERTEX_SHADER)
@@ -70,19 +73,39 @@ class Renderer:
     def __del__(self):
         global _INSTANCE
 
+        glDeleteFramebuffers(self.frame_buffer)
+        glDeleteRenderbuffers(self.result_texture)
         glfw.terminate()
+
         _INSTANCE = None
 
-    def draw(self):
-        glClear(GL_COLOR_BUFFER_BIT)
+    def render(self, gen_image=True):
+        image = None
 
-        with self.shader:
-            glBindVertexArray(self.vao_id)
+        glUseProgram(self.shader)
+        glBindVertexArray(self.vao_id)
+
+        if gen_image:
+            glBindFramebuffer(GL_FRAMEBUFFER, self.frame_buffer)
+            glClear(GL_COLOR_BUFFER_BIT)
             glDrawArrays(GL_TRIANGLES, 0, vertex_data.shape[0])
-            glBindVertexArray(0)
+            glReadBuffer(GL_COLOR_ATTACHMENT0)
+            image = glReadPixels(0,0,self.resolution[0], self.resolution[1],GL_RGB, GL_UNSIGNED_BYTE)
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            image = np.fromstring(image, dtype=np.uint8)\
+                .reshape((self.resolution[1], self.resolution[0], 3))
+            image = np.flip(image, 0)
 
-        glfw.swap_buffers(self.window)
+        if not self.hidden:
+            glClear(GL_COLOR_BUFFER_BIT)
+            glDrawArrays(GL_TRIANGLES, 0, vertex_data.shape[0])
+            glfw.swap_buffers(self.window)
+
+        glUseProgram(0)
+        glBindVertexArray(0)
         glfw.poll_events()
+
+        return image
 
     def _get_triangle_vao(self):
         # it is a container for buffers
@@ -106,6 +129,28 @@ class Renderer:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindVertexArray(0)
         return vao_id
+
+    def _init_frame_buffer_objects(self):
+        self.frame_buffer = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.frame_buffer)
+        self.result_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.result_texture)
+
+        self._init_alpha()
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, self.resolution[0], self.resolution[1], 0, GL_RGB, GL_UNSIGNED_BYTE, None)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.result_texture, 0)
+
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+    def _init_alpha(self):
+        glClearColor(0, 0, 0, 1)
+        glDepthMask(False)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
     def _screen_to_standard_transform(self):
         """

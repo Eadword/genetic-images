@@ -110,8 +110,9 @@ def main(photo, output, target_loss=1.0, save_intermediate=False):
     resolution = image.shape[:2]
 
     renderer = Renderer((800,600), hidden=False)
+    imageio.imwrite('{}/test.png'.format(output), renderer.render())
     for n in range(1000):
-        renderer.draw()
+        renderer.render(gen_image=False)
         if n % 100 == 0:
             print(n)
         time.sleep(0.001)
