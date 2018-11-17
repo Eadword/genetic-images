@@ -4,18 +4,21 @@ from render import Renderer
 import numpy as np
 import tensorflow as tf
 
+from datetime import datetime
 import imageio
 import sys
 import argparse
 
-MAX_GENERATIONS = 40
+MAX_GENERATIONS = 200
 GENERATION_SIZE = 100
 BATCH_SIZE = GENERATION_SIZE  # decrease this if memory is tight, must divide GENERATION_SIZE evenly
 INIT_POP_AVERAGE_TRIANGLES = 5
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
 PROB_ADD_TRI = 0.50  # change a random triangle is added
-GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.25)
-np.random.seed(908759798)
+GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.1)
+np.random.seed()
+
+generation = 0
 
 # A Pop is a tuple of (Triangles, Colors) where a color is an RGBA value stored as 4 uint8s
 # A Triangle is a (n, 2) shaped array of coordinates
@@ -48,7 +51,9 @@ def randomly_generate_population(pop_size, avg_triangles, resolution):
 def _calculate_ssim(tfsess, b):
     # requires init_tensors first
     # b is a batch of BATCH_SIZE images
-    return tfsess.run(_calculate_ssim.tensor, feed_dict={_calculate_ssim.im_b: b})
+    ssim_v, summary = tfsess.run([_calculate_ssim.tensor, _calculate_ssim.summary], feed_dict={_calculate_ssim.im_b: b})
+    tf_log_writer.add_summary(summary, generation)
+    return ssim_v
 
 
 def copy_pop(pop):
@@ -76,6 +81,7 @@ def sort_two_lists(a, b):
 
 
 def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
+    global generation
     population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
     generation = 0
     while True:
@@ -90,7 +96,7 @@ def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
             imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(calculate_image(population[0]) * 256))
 
         population_fitness = np.array(population_fitness)
-        print("Gen {}; Best: {}; Mean: {}; Median: {}; SDEV: {}.".format(generation, population_fitness[0], population_fitness.mean(), population_fitness[GENERATION_SIZE//2], population_fitness.std()))
+        print("Gen {}; Best: {}; Mean: {}.".format(generation, population_fitness[0], population_fitness.mean()))
 
         # check if we have reached our target_loss
         if generation >= MAX_GENERATIONS:
@@ -115,22 +121,45 @@ def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
     return population[0], population_fitness[0], generation
 
 
-def init_tensors(image, resolution):
-    _calculate_ssim.im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
-    _calculate_ssim.im_b = tf.placeholder(np.float32, shape=(BATCH_SIZE, resolution[1], resolution[0], 3))
-    im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
-    im_b = tf.cast(_calculate_ssim.im_b, np.float32)
-    _calculate_ssim.tensor = tf.image.ssim(im_a, im_b, 1.0)
+def init_tensors(tfsess, image, resolution):
+    with tf.name_scope('base_image'):
+        _calculate_ssim.im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
+        im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
+    with tf.name_scope('input_images'):
+        _calculate_ssim.im_b = tf.placeholder(np.float32, shape=(BATCH_SIZE, resolution[1], resolution[0], 3))
+        im_b = tf.cast(_calculate_ssim.im_b, np.float32)
+    with tf.name_scope('ssim'):
+        _calculate_ssim.tensor = tf.image.ssim(im_a, im_b, 1.0)
+
+        with tf.name_scope('summaries'):
+            ssim = _calculate_ssim.tensor
+            mean = tf.reduce_mean(ssim)
+
+            with tf.name_scope('stddev'):
+                stddev = tf.sqrt(tf.reduce_mean(tf.square(ssim - mean)))
+
+            max = tf.reduce_max(ssim)
+            min = tf.reduce_min(ssim)
+            mean_s = tf.summary.scalar('mean', mean)
+            stddev_s = tf.summary.scalar('stddev', stddev)
+            max_s = tf.summary.scalar('max', max)
+            min_s = tf.summary.scalar('min', min)
+            ssim_hs = tf.summary.histogram('ssim', ssim)
+
+    _calculate_ssim.summary = tf.summary.merge([mean_s, stddev_s, max_s, min_s, ssim_hs])
+
+    global tf_log_writer
+    tf_log_writer = tf.summary.FileWriter('./log/{}'.format(datetime.now()), tfsess.graph)
 
 
 def main(photo, output, target_ssim=0.7, save_intermediate=False):
     image = imageio.imread(photo)
     resolution = (image.shape[1], image.shape[0]) # because we store in Row-major order
-    init_tensors(image, resolution)
 
     renderer = Renderer(resolution)
 
     with tf.Session() as sess:
+        init_tensors(sess, image, resolution)
         pop, fitness, generation = train(sess, resolution, target_ssim=target_ssim, intermediate_path=output if save_intermediate else None)
         imageio.imwrite('{}/final.png'.format(output), np.uint8(calculate_image(pop) * 256.0))
 
