@@ -8,12 +8,13 @@ import tensorflow as tf
 from datetime import datetime
 import imageio
 import sys
+from copy import deepcopy, copy
 import argparse
 
 MAX_GENERATIONS = 200
 GENERATION_SIZE = 100
 BATCH_SIZE = GENERATION_SIZE  # decrease this if memory is tight, must divide GENERATION_SIZE evenly
-INIT_POP_AVERAGE_TRIANGLES = 5
+INIT_AVERAGE_TRIANGLES = 5
 GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.1)
 
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
@@ -23,34 +24,99 @@ PROB_MUT_TRI = 0.05  # chance each triangle is mutated
 MUT_TRI_VERT_MEAN = 0.02  # on average, move x*resolution
 MUT_TRI_COLOR_MEAN = 1.0  # on average, change each color channel by x
 
+PROB_ALTER_ORDERING = 0.001  # chance any two triangles are swapped thus changing render order
+
 random.seed()
 
 generation = 0
+resolution = (0, 0)
 
 # A Pop is a tuple of (Triangles, Colors) where a color is an RGBA value stored as 4 uint8s
 # A Triangle is a (n, 2) shaped array of coordinates
 
 
-def randomly_generate_triangle(resolution):
+class Individual:
+    def __init__(self, triangles=None, colors=None):
+        if triangles and colors:
+            assert len(triangles) == len(colors)
+            self.triangles = triangles
+            self.colors = colors
+        else:
+            self.triangles = []
+            self.colors = []
+
+    @staticmethod
+    def generate(n_triangles):
+        tl = []
+        cl = []
+        for _ in range(n_triangles):
+            t, c = randomly_generate_triangle()
+            tl.append(t)
+            cl.append(c)
+        return Individual(tl, cl)
+
+    @staticmethod
+    def cross(a, b):
+        pass
+
+    def mutate(self):
+        # Mutation types:
+        # 1) remove a triangle
+        # 2) shift shade of a triangle
+        # 3) shift points of a triangle
+        # 4) add a triangle
+        # 5) swap two triangles (which one renders over the others)
+        while len(self) > 1 and random.rand() < PROB_DEL_TRI:
+            choice = random.randint(0, len(self))
+            del self[choice]
+
+        for i in range(len(self)):
+            if random.rand() < PROB_MUT_TRI:
+                for v in range(3):
+                    self.triangles[i][v, 0] = \
+                        (self.triangles[i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0])\
+                        .clip(0, resolution[0])
+                    self.triangles[i][v, 1] = \
+                        (self.triangles[i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1])\
+                        .clip(0, resolution[1])
+
+            if random.rand() < PROB_MUT_TRI:
+                self.colors[i] = np.uint8((self.colors[i] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 255))
+
+        while random.rand() < PROB_ADD_TRI:
+            self.append(randomly_generate_triangle())
+
+        while len(self) > 1 and random.rand() < PROB_ALTER_ORDERING:
+            i = random.randint(0, len(self) - 1)
+            self[i], self[i+1] = self[i+1], self[i]
+
+    def append(self, pair):
+        self.triangles.append(pair[0])
+        self.colors.append(pair[1])
+
+    def __getitem__(self, item):
+        return self.triangles[item], self.colors[item]
+
+    def __setitem__(self, key, value):
+        self.triangles[key] = value[0]
+        self.colors[key] = value[1]
+
+    def __delitem__(self, key):
+        del self.triangles[key]
+        del self.colors[key]
+
+    def __len__(self):
+        assert len(self.triangles) == len(self.colors)
+        return len(self.triangles)
+
+
+def randomly_generate_triangle():
     return np.int32(random.rand(3, 2) * resolution), np.uint8(random.rand(4) * 256)
 
 
-def randomly_generate_pop(triangles, resolution):
-    tl = []
-    cl = []
-    for _ in range(triangles):
-        t, c = randomly_generate_triangle(resolution)
-        tl.append(t)
-        cl.append(c)
-    return tl, cl
-
-
-def randomly_generate_population(pop_size, avg_triangles, resolution):
+def randomly_generate_population(pop_size, avg_triangles):
     return [
-        randomly_generate_pop(
-            np.random.randint(min(1, avg_triangles // 2), avg_triangles * 2),
-            resolution
-        )
+        Individual.generate(np.random.randint(min(1, avg_triangles // 2), avg_triangles * 2))
         for _ in range(pop_size)
     ]
 
@@ -63,36 +129,6 @@ def _calculate_ssim(tfsess, b):
     return ssim_v
 
 
-def copy_pop(pop):
-    return ([t.copy() for t in pop[0]], [c.copy() for c in pop[1]])
-
-
-def mutate_pop(pop, resolution):
-    # Mutation types:
-    # 1) remove a triangle
-    # 2) shift shade of a triangle
-    # 3) shift points of a triangle
-    # 4) add a triangle
-    while len(pop[0]) > 1 and random.rand() < PROB_DEL_TRI:
-        choice = random.randint(0, len(pop[0]))
-        del pop[0][choice]
-        del pop[1][choice]
-
-    for i in range(len(pop[0])):
-        if random.rand() < PROB_MUT_TRI:
-            for v in range(3):
-                pop[0][i][v, 0] = (pop[0][i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0]).clip(0, resolution[0])
-                pop[0][i][v, 1] = (pop[0][i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1]).clip(0, resolution[1])
-
-        if random.rand() < PROB_MUT_TRI:
-            pop[1][i] = np.uint8((pop[1][i] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 255))
-
-    while random.rand() < PROB_ADD_TRI:
-        verts, color = randomly_generate_triangle(resolution)
-        pop[0].append(verts)
-        pop[1].append(color)
-
-
 def sort_two_lists(a, b, reverse=False):
     assert len(a) == len(b)
     indexes = list(range(len(a)))
@@ -100,9 +136,9 @@ def sort_two_lists(a, b, reverse=False):
     return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
 
 
-def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
+def train(tfsess, target_ssim=0.7, intermediate_path=None):
     global generation
-    population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
+    population = randomly_generate_population(GENERATION_SIZE, INIT_AVERAGE_TRIANGLES)
     generation = 0
     while True:
         population_fitness = []
@@ -130,18 +166,18 @@ def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
         # duplicate the top members to fill the gap
         n_babies = GENERATION_SIZE - GENERATION_CARRYOVER
         for i in range(n_babies):
-            population.append(copy_pop(population[i]))
+            population.append(deepcopy(population[i]))
 
         # randomly mutate all individuals
-        for i in range(GENERATION_CARRYOVER, GENERATION_SIZE):
-            mutate_pop(population[i], resolution)
+        for i in population[GENERATION_CARRYOVER:]:
+            i.mutate()
 
         generation += 1
 
     return population[0], population_fitness[0], generation
 
 
-def init_tensors(tfsess, image, resolution):
+def init_tensors(tfsess, image):
     with tf.name_scope('base_image'):
         _calculate_ssim.im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
         im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
@@ -173,15 +209,16 @@ def init_tensors(tfsess, image, resolution):
 
 
 def main(photo, output, target_ssim=0.7, save_intermediate=False):
+    global resolution
     image = imageio.imread(photo)
     resolution = (image.shape[1], image.shape[0]) # because we store in Row-major order
 
     renderer = Renderer(resolution)
 
     with tf.Session() as sess:
-        init_tensors(sess, image, resolution)
-        pop, fitness, generation = train(sess, resolution, target_ssim=target_ssim, intermediate_path=output if save_intermediate else None)
-        imageio.imwrite('{}/final.png'.format(output), np.uint8(calculate_image(pop) * 256.0))
+        init_tensors(sess, image)
+        best_indv, fitness, generation = train(sess, target_ssim=target_ssim, intermediate_path=output if save_intermediate else None)
+        imageio.imwrite('{}/final.png'.format(output), np.uint8(calculate_image(best_indv) * 256.0))
 
 
 if __name__ == '__main__':
