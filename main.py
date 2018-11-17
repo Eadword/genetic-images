@@ -1,7 +1,5 @@
 from image import calculate_image
-import image as imglib
 from render import Renderer
-import time
 
 import numpy as np
 import tensorflow as tf
@@ -10,7 +8,7 @@ import imageio
 import sys
 import argparse
 
-MAX_GENERATIONS = 30
+MAX_GENERATIONS = 5
 GENERATION_SIZE = 80
 INIT_POP_AVERAGE_TRIANGLES = 5
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
@@ -18,16 +16,22 @@ PROB_ADD_TRI = 0.50  # change a random triangle is added
 GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.25)
 np.random.seed(908759798)
 
-# A Pop is a list of Triangles
-# A Triangle is a tuple of two arrays, the first it's three coordinates and the second its RGBA color
+# A Pop is a tuple of (Triangles, Colors) where a color is an RGBA value stored as 4 uint8s
+# A Triangle is a (n, 2) shaped array of coordinates
 
 
 def randomly_generate_triangle(resolution):
-    return np.uint32(np.random.rand(3, 2) * resolution), np.uint8(np.random.rand(4) * 256)
+    return np.int32(np.random.rand(3, 2) * resolution), np.uint8(np.random.rand(4) * 256)
 
 
 def randomly_generate_pop(triangles, resolution):
-    return [randomly_generate_triangle(resolution) for _ in range(triangles)]
+    tl = []
+    cl = []
+    for _ in range(triangles):
+        t, c = randomly_generate_triangle(resolution)
+        tl.append(t)
+        cl.append(c)
+    return tl, cl
 
 
 def randomly_generate_population(pop_size, avg_triangles, resolution):
@@ -41,27 +45,26 @@ def randomly_generate_population(pop_size, avg_triangles, resolution):
 
 
 def calculate_loss(a, b):
-    return np.sum(np.sqrt((np.float64(a) - np.float64(b))**2))
-
-
-def calculate_population_fitness(tfsess, image, population):
-    return [
-        1 / calculate_loss(image, calculate_image(pop, image.shape[:2]))
-        for pop in population
-    ]
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    return np.sum(np.sqrt((a - b)**2))
 
 
 def copy_pop(pop):
-    return [(points.copy(), color.copy()) for (points, color) in pop]
+    return (pop[0].copy(), pop[1].copy())
 
 
 def mutate_pop(pop, resolution):
     # Two types of mutation 1) remove a triangle, 2) add a triangle
-    while len(pop) > 1 and np.random.rand() < PROB_DEL_TRI:
-        del pop[np.random.randint(len(pop))]
+    while len(pop[0]) > 1 and np.random.rand() < PROB_DEL_TRI:
+        choice = np.random.randint(0, len(pop[0]))
+        del pop[0][choice]
+        del pop[1][choice]
 
     while np.random.rand() < PROB_ADD_TRI:
-        pop.append(randomly_generate_triangle(resolution))
+        verts, color = randomly_generate_triangle(resolution)
+        pop[0].append(verts)
+        pop[1].append(color)
 
 
 def sort_two_lists(a, b):
@@ -76,16 +79,20 @@ def train(tfsess, image, target_loss=1.0, intermediate_path=None):
     population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
     generation = 0
     while True:
-        fitness = calculate_population_fitness(tfsess, image, population)
-        fitness, population = sort_two_lists(fitness, population)
+        population_fitness = [
+            1 / calculate_loss(image, calculate_image(pop))
+            for pop in population
+        ]
+
+        population_fitness, population = sort_two_lists(population_fitness, population)
         population = list(population)
-        fitness = np.array(fitness)
-        print("Gen {}; Best: {}; Mean: {}; Median: {}; SDEV: {}.".format(generation, fitness[0], fitness.mean(), fitness[GENERATION_SIZE//2], fitness.std()))
+        population_fitness = np.array(population_fitness)
+        print("Gen {}; Best: {}; Mean: {}; Median: {}; SDEV: {}.".format(generation, population_fitness[0], population_fitness.mean(), population_fitness[GENERATION_SIZE//2], population_fitness.std()))
 
         # check if we have reached our target_loss
         if generation >= MAX_GENERATIONS:
             break  # Not an optimal solution, but we have to stop somewhere
-        elif 1 / fitness.max() <= target_loss:
+        elif 1 / population_fitness.max() <= target_loss:
             break
 
         # drop the lowest pops
@@ -102,24 +109,18 @@ def train(tfsess, image, target_loss=1.0, intermediate_path=None):
 
         generation+=1
 
-    return population[0], fitness[0], generation
+    return population[0], population_fitness[0], generation
 
 
 def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
     resolution = image.shape[:2]
 
-    renderer = Renderer((800,600), hidden=False)
-    imageio.imwrite('{}/test.png'.format(output), renderer.render())
-    for n in range(1000):
-        renderer.render(gen_image=False)
-        if n % 100 == 0:
-            print(n)
-        time.sleep(0.001)
+    renderer = Renderer(resolution, hidden=False)
 
-    # with tf.Session() as sess:
-    #     pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
-    #     imageio.imwrite('{}/final.png'.format(output), calculate_image(sess, pop))
+    with tf.Session() as sess:
+        pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
+        imageio.imwrite('{}/final.png'.format(output), calculate_image(pop))
 
 
 if __name__ == '__main__':

@@ -13,7 +13,7 @@ class Renderer:
     def __new__(cls, *args, **kwargs):
         global _INSTANCE
 
-        if not _INSTANCE:
+        if _INSTANCE is None:
             _INSTANCE = super(Renderer, cls).__new__(cls)
             _INSTANCE._run_init = True
         return _INSTANCE
@@ -109,11 +109,10 @@ class Renderer:
             glClear(GL_COLOR_BUFFER_BIT)
             glDrawArrays(GL_TRIANGLES, 0, self.n_verts)
             glReadBuffer(GL_COLOR_ATTACHMENT0)
-            image = glReadPixels(0,0,self.resolution[0], self.resolution[1],GL_RGB, GL_UNSIGNED_BYTE)
+            image = glReadPixels(0,0,self.resolution[1], self.resolution[0], GL_RGB, GL_UNSIGNED_BYTE)
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
             image = np.fromstring(image, dtype=np.uint8)\
-                .reshape((self.resolution[1], self.resolution[0], 3))
-            image = np.flip(image, 0)
+                .reshape((self.resolution[0], self.resolution[1], 3))
 
         if not self.hidden:
             glClear(GL_COLOR_BUFFER_BIT)
