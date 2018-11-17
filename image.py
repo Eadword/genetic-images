@@ -30,7 +30,7 @@ if METHOD == 'GL':
         renderer = Renderer()  # should be trivial assignment from locally stored instance
         renderer.data(
             pop[0],
-            np.stack((pop[1], pop[1], pop[1]), axis=1)
+            np.tile(pop[1], (1, 3)).reshape((-1, 4))
         )
         return renderer.render()
 
@@ -51,7 +51,7 @@ if METHOD == 'GL':
 #             max_x = t_coords[:, 0].max()
 #             max_y = t_coords[:, 1].max()
 #
-#             src_a = np.float64(t_color[3]) / 255
+#             src_a = np.float64(t_color[3]) / 256
 #
 #             for x in range(min_x, max_x + 1):
 #                 for y in range(min_y, max_y + 1):
@@ -122,7 +122,7 @@ if METHOD == 'GL':
 #         indicies_inside = tf.boolean_mask(locations, within, axis=0)
 #         # indicies_not_inside = tf.boolean_mask(locations, not_within, axis=0)
 #
-#         src_a = tf.cast(t_color[3], np.float64) / 255
+#         src_a = tf.cast(t_color[3], np.float64) / 256
 #         src_c = tf.cast(t_color[:3], np.float64)
 #         dst_c = tf.cast(tf.gather_nd(image, indicies_inside), np.float64)
 #

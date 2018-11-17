@@ -8,8 +8,9 @@ import imageio
 import sys
 import argparse
 
-MAX_GENERATIONS = 5
-GENERATION_SIZE = 80
+MAX_GENERATIONS = 40
+GENERATION_SIZE = 100
+BATCH_SIZE = GENERATION_SIZE  # decrease this if memory is tight, must divide GENERATION_SIZE evenly
 INIT_POP_AVERAGE_TRIANGLES = 5
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
 PROB_ADD_TRI = 0.50  # change a random triangle is added
@@ -44,10 +45,10 @@ def randomly_generate_population(pop_size, avg_triangles, resolution):
     ]
 
 
-def calculate_loss(a, b):
-    a = np.asarray(a, dtype=np.float32)
-    b = np.asarray(b, dtype=np.float32)
-    return np.sum(np.sqrt((a - b)**2))
+def _calculate_ssim(tfsess, b):
+    # requires init_tensors first
+    # b is a batch of BATCH_SIZE images
+    return tfsess.run(_calculate_ssim.tensor, feed_dict={_calculate_ssim.im_b: b})
 
 
 def copy_pop(pop):
@@ -74,27 +75,27 @@ def sort_two_lists(a, b):
     return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
 
 
-def train(tfsess, image, resolution, target_loss=1.0, intermediate_path=None):
+def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
     population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
     generation = 0
     while True:
-        population_fitness = [
-            1 / calculate_loss(image, calculate_image(pop))
-            for pop in population
-        ]
+        population_fitness = []
+        for b in range(GENERATION_SIZE // BATCH_SIZE):
+            image_batch = [calculate_image(population[i+b*BATCH_SIZE]) for i in range(BATCH_SIZE)]
+            population_fitness.extend(_calculate_ssim(tfsess, image_batch))
+            del image_batch
 
         population_fitness, population = sort_two_lists(population_fitness, population)
         if intermediate_path:
-            imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), calculate_image(population[0]))
+            imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(calculate_image(population[0]) * 256))
 
-        population = list(population)
         population_fitness = np.array(population_fitness)
         print("Gen {}; Best: {}; Mean: {}; Median: {}; SDEV: {}.".format(generation, population_fitness[0], population_fitness.mean(), population_fitness[GENERATION_SIZE//2], population_fitness.std()))
 
         # check if we have reached our target_loss
         if generation >= MAX_GENERATIONS:
             break  # Not an optimal solution, but we have to stop somewhere
-        elif 1 / population_fitness.max() <= target_loss:
+        elif population_fitness.max() >= target_ssim:
             break
 
         # drop the lowest pops
@@ -114,15 +115,24 @@ def train(tfsess, image, resolution, target_loss=1.0, intermediate_path=None):
     return population[0], population_fitness[0], generation
 
 
-def main(photo, output, target_loss=1.0, save_intermediate=False):
+def init_tensors(image, resolution):
+    _calculate_ssim.im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
+    _calculate_ssim.im_b = tf.placeholder(np.float32, shape=(BATCH_SIZE, resolution[1], resolution[0], 3))
+    im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
+    im_b = tf.cast(_calculate_ssim.im_b, np.float32)
+    _calculate_ssim.tensor = tf.image.ssim(im_a, im_b, 1.0)
+
+
+def main(photo, output, target_ssim=0.7, save_intermediate=False):
     image = imageio.imread(photo)
     resolution = (image.shape[1], image.shape[0]) # because we store in Row-major order
+    init_tensors(image, resolution)
 
-    renderer = Renderer(resolution, hidden=False)
+    renderer = Renderer(resolution)
 
     with tf.Session() as sess:
-        pop, fitness, generation = train(sess, image, resolution, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
-        imageio.imwrite('{}/final.png'.format(output), calculate_image(pop))
+        pop, fitness, generation = train(sess, resolution, target_ssim=target_ssim, intermediate_path=output if save_intermediate else None)
+        imageio.imwrite('{}/final.png'.format(output), np.uint8(calculate_image(pop) * 256.0))
 
 
 if __name__ == '__main__':
