@@ -2,6 +2,7 @@ from image import calculate_image
 from render import Renderer
 
 import numpy as np
+import numpy.random as random
 import tensorflow as tf
 
 from datetime import datetime
@@ -13,10 +14,16 @@ MAX_GENERATIONS = 200
 GENERATION_SIZE = 100
 BATCH_SIZE = GENERATION_SIZE  # decrease this if memory is tight, must divide GENERATION_SIZE evenly
 INIT_POP_AVERAGE_TRIANGLES = 5
+GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.1)
+
 PROB_DEL_TRI = 0.50  # chance any triangle is deleted
 PROB_ADD_TRI = 0.50  # change a random triangle is added
-GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.1)
-np.random.seed()
+
+PROB_MUT_TRI = 0.05  # chance each triangle is mutated
+MUT_TRI_VERT_MEAN = 0.02  # on average, move x*resolution
+MUT_TRI_COLOR_MEAN = 1.0  # on average, change each color channel by x
+
+random.seed()
 
 generation = 0
 
@@ -25,7 +32,7 @@ generation = 0
 
 
 def randomly_generate_triangle(resolution):
-    return np.int32(np.random.rand(3, 2) * resolution), np.uint8(np.random.rand(4) * 256)
+    return np.int32(random.rand(3, 2) * resolution), np.uint8(random.rand(4) * 256)
 
 
 def randomly_generate_pop(triangles, resolution):
@@ -57,26 +64,39 @@ def _calculate_ssim(tfsess, b):
 
 
 def copy_pop(pop):
-    return (pop[0].copy(), pop[1].copy())
+    return ([t.copy() for t in pop[0]], [c.copy() for c in pop[1]])
 
 
 def mutate_pop(pop, resolution):
-    # Two types of mutation 1) remove a triangle, 2) add a triangle
-    while len(pop[0]) > 1 and np.random.rand() < PROB_DEL_TRI:
-        choice = np.random.randint(0, len(pop[0]))
+    # Mutation types:
+    # 1) remove a triangle
+    # 2) shift shade of a triangle
+    # 3) shift points of a triangle
+    # 4) add a triangle
+    while len(pop[0]) > 1 and random.rand() < PROB_DEL_TRI:
+        choice = random.randint(0, len(pop[0]))
         del pop[0][choice]
         del pop[1][choice]
 
-    while np.random.rand() < PROB_ADD_TRI:
+    for i in range(len(pop[0])):
+        if random.rand() < PROB_MUT_TRI:
+            for v in range(3):
+                pop[0][i][v, 0] = (pop[0][i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0]).clip(0, resolution[0])
+                pop[0][i][v, 1] = (pop[0][i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1]).clip(0, resolution[1])
+
+        if random.rand() < PROB_MUT_TRI:
+            pop[1][i] = np.uint8((pop[1][i] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 255))
+
+    while random.rand() < PROB_ADD_TRI:
         verts, color = randomly_generate_triangle(resolution)
         pop[0].append(verts)
         pop[1].append(color)
 
 
-def sort_two_lists(a, b):
+def sort_two_lists(a, b, reverse=False):
     assert len(a) == len(b)
     indexes = list(range(len(a)))
-    indexes.sort(key=a.__getitem__, reverse=True)
+    indexes.sort(key=a.__getitem__, reverse=reverse)
     return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
 
 
@@ -91,7 +111,7 @@ def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
             population_fitness.extend(_calculate_ssim(tfsess, image_batch))
             del image_batch
 
-        population_fitness, population = sort_two_lists(population_fitness, population)
+        population_fitness, population = sort_two_lists(population_fitness, population, reverse=True)
         if intermediate_path:
             imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(calculate_image(population[0]) * 256))
 
@@ -113,10 +133,10 @@ def train(tfsess, resolution, target_ssim=0.7, intermediate_path=None):
             population.append(copy_pop(population[i]))
 
         # randomly mutate all individuals
-        for i in range(GENERATION_SIZE):
+        for i in range(GENERATION_CARRYOVER, GENERATION_SIZE):
             mutate_pop(population[i], resolution)
 
-        generation+=1
+        generation += 1
 
     return population[0], population_fitness[0], generation
 
