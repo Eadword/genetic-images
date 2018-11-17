@@ -109,10 +109,13 @@ class Renderer:
             glClear(GL_COLOR_BUFFER_BIT)
             glDrawArrays(GL_TRIANGLES, 0, self.n_verts)
             glReadBuffer(GL_COLOR_ATTACHMENT0)
-            image = glReadPixels(0,0,self.resolution[1], self.resolution[0], GL_RGB, GL_UNSIGNED_BYTE)
+            image = glReadPixels(0,0,self.resolution[0], self.resolution[1], GL_RGB, GL_UNSIGNED_BYTE)
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            # numpy is row-major order and the screen col-major so the shapes appear to be wrong but are not
             image = np.fromstring(image, dtype=np.uint8)\
-                .reshape((self.resolution[0], self.resolution[1], 3))
+                .reshape((self.resolution[1], self.resolution[0], 3))
+            # OpenGL reads from bottom up, so we want to flip the y axis
+            image = np.flip(image, axis=0)
 
         if not self.hidden:
             glClear(GL_COLOR_BUFFER_BIT)

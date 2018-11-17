@@ -74,8 +74,7 @@ def sort_two_lists(a, b):
     return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
 
 
-def train(tfsess, image, target_loss=1.0, intermediate_path=None):
-    resolution = image.shape[:2]
+def train(tfsess, image, resolution, target_loss=1.0, intermediate_path=None):
     population = randomly_generate_population(GENERATION_SIZE, INIT_POP_AVERAGE_TRIANGLES, resolution)
     generation = 0
     while True:
@@ -85,6 +84,9 @@ def train(tfsess, image, target_loss=1.0, intermediate_path=None):
         ]
 
         population_fitness, population = sort_two_lists(population_fitness, population)
+        if intermediate_path:
+            imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), calculate_image(population[0]))
+
         population = list(population)
         population_fitness = np.array(population_fitness)
         print("Gen {}; Best: {}; Mean: {}; Median: {}; SDEV: {}.".format(generation, population_fitness[0], population_fitness.mean(), population_fitness[GENERATION_SIZE//2], population_fitness.std()))
@@ -114,12 +116,12 @@ def train(tfsess, image, target_loss=1.0, intermediate_path=None):
 
 def main(photo, output, target_loss=1.0, save_intermediate=False):
     image = imageio.imread(photo)
-    resolution = image.shape[:2]
+    resolution = (image.shape[1], image.shape[0]) # because we store in Row-major order
 
     renderer = Renderer(resolution, hidden=False)
 
     with tf.Session() as sess:
-        pop, fitness, generation = train(sess, image, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
+        pop, fitness, generation = train(sess, image, resolution, target_loss=target_loss, intermediate_path=output if save_intermediate else None)
         imageio.imwrite('{}/final.png'.format(output), calculate_image(pop))
 
 
