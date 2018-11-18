@@ -26,11 +26,11 @@ def in_triangle(coords, loc):
 
 
 if METHOD == 'GL':
-    def calculate_image(indv):
+    def calculate_image(triangles, colors):
         renderer = Renderer()  # should be trivial assignment from locally stored instance
         renderer.data(
-            indv.triangles,
-            np.tile(indv.colors, (1, 3)).reshape((-1, 4))
+            triangles,
+            np.tile(colors, (1, 3)).reshape((-1, 4))
         )
         return renderer.render()
 
