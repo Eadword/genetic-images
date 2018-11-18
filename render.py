@@ -98,7 +98,7 @@ class Renderer:
 
         self.n_verts = vertices.size // 2
 
-    def render(self, gen_image=True):
+    def render(self, gen_image=True, render_to_window=False):
         image = None
 
         glUseProgram(self.program)
@@ -117,7 +117,7 @@ class Renderer:
             # OpenGL reads from bottom up, so we want to flip the y axis
             image = np.flip(image, axis=0)
 
-        if not self.hidden:
+        if not self.hidden and render_to_window:
             glClear(GL_COLOR_BUFFER_BIT)
             glDrawArrays(GL_TRIANGLES, 0, self.n_verts)
             glfw.swap_buffers(self.window)

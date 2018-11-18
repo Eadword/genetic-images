@@ -26,13 +26,13 @@ def in_triangle(coords, loc):
 
 
 if METHOD == 'GL':
-    def calculate_image(triangles, colors):
+    def calculate_image(triangles, colors, render_to_window=False):
         renderer = Renderer()  # should be trivial assignment from locally stored instance
         renderer.data(
             triangles,
             np.tile(colors, (1, 3)).reshape((-1, 4))
         )
-        return renderer.render()
+        return renderer.render(render_to_window=render_to_window)
 
 # if METHOD == 'TF':
 #     # TODO: re-write to go for each pixel instead of for each triangle

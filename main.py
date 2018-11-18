@@ -11,26 +11,27 @@ import sys
 from copy import deepcopy, copy
 import argparse
 
-MAX_GENERATIONS = 200
+MAX_GENERATIONS = 100000
 GENERATION_SIZE = 100
 BATCH_SIZE = GENERATION_SIZE  # decrease this if memory is tight, must divide GENERATION_SIZE evenly
 INIT_AVERAGE_TRIANGLES = 5
-GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.1)
+GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.2)
 
 DIST_MATCHING_DIFF_COST = 0.4
 DIST_EXCESS_COST = 1.0
 DIST_DISJOINT_COST = 1.0
-MAX_DISTANCE_FOR_BREEDING = 0.8
-INTERSPECIES_BREEDING_RATE = 0.001
+MAX_DISTANCE_FOR_BREEDING = 0.7
 
-PROB_DEL_TRI = 0.50  # chance any triangle is deleted
-PROB_ADD_TRI = 0.50  # change a random triangle is added
+PROB_DEL_TRI = 0.20  # chance any triangle is deleted
+PROB_ADD_TRI = 0.10  # change a random triangle is added
 
-PROB_MUT_TRI = 0.05  # chance each triangle is mutated
+PROB_MUT_TRI = 0.10  # chance each triangle is mutated
 MUT_TRI_VERT_MEAN = 0.02  # on average, move x*resolution
-MUT_TRI_COLOR_MEAN = 1.0  # on average, change each color channel by x
+MUT_TRI_COLOR_MEAN = 8.0  # on average, change each color channel by x
 
 PROB_ALTER_ORDERING = 0.001  # chance any two triangles are swapped thus changing render order
+
+HIDDEN_RENDER=False
 
 random.seed()
 
@@ -176,8 +177,8 @@ class Individual:
     def mutate(self):
         # Mutation types:
         # 1) remove a triangle
-        # 2) shift shade of a triangle
-        # 3) shift points of a triangle
+        # 2) shift a shade of a triangle
+        # 3) shift a point of a triangle
         # 4) add a triangle
         # 5) swap two triangles (which one renders over the others)
         while len(self) > 1 and random.rand() < PROB_DEL_TRI:
@@ -186,16 +187,17 @@ class Individual:
 
         for i in range(len(self)):
             if random.rand() < PROB_MUT_TRI:
-                for v in range(3):
-                    self.triangles[i][v, 0] = \
-                        (self.triangles[i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0])\
-                        .clip(0, resolution[0])
-                    self.triangles[i][v, 1] = \
-                        (self.triangles[i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1])\
-                        .clip(0, resolution[1])
+                v = random.randint(0, 3)
+                self.triangles[i][v, 0] = \
+                    (self.triangles[i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0])\
+                    .clip(0, resolution[0])
+                self.triangles[i][v, 1] = \
+                    (self.triangles[i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1])\
+                    .clip(0, resolution[1])
 
             if random.rand() < PROB_MUT_TRI:
-                self.colors[i] = np.uint8((self.colors[i] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 255))
+                c = random.randint(0, 4)
+                self.colors[i][c] = np.uint8((self.colors[i][c] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 256))
 
         while random.rand() < PROB_ADD_TRI:
             v, c = randomly_generate_triangle()
@@ -206,8 +208,13 @@ class Individual:
             i = random.randint(0, len(self) - 1)
             self[i], self[i+1] = self[i+1], self[i]
 
-    def render(self):
-        return calculate_image(self.triangles, self.colors)
+    def render(self, gen_image=True, render_to_window=False):
+        renderer = Renderer()  # should be trivial assignment from locally stored instance
+        renderer.data(
+            self.triangles,
+            np.tile(self.colors, (1, 3)).reshape((-1, 4))
+        )
+        return renderer.render(gen_image=gen_image, render_to_window=render_to_window)
 
     def append(self, pair):
         self.triangles.append(pair[0])
@@ -249,8 +256,13 @@ class Individual:
 Individual.next_trait_id = 1
 
 
-def randomly_generate_triangle():
-    return np.int32(random.rand(3, 2) * resolution), np.uint8(random.rand(4) * 256)
+def randomly_generate_triangle(transparent=False):
+    verts = np.int32(random.rand(3, 2) * resolution)
+    colors = np.uint8(random.rand(4) * 256)
+    if transparent:
+        return verts, colors * [1,1,1,0]
+    else:
+        return verts, colors
 
 
 def randomly_generate_population(pop_size, avg_triangles):
@@ -260,12 +272,20 @@ def randomly_generate_population(pop_size, avg_triangles):
     ]
 
 
-def _calculate_ssim(tfsess, b):
+def _calculate_ssim(tfsess, i):
     # requires init_tensors first
-    # b is a batch of BATCH_SIZE images
-    ssim_v, summary = tfsess.run([_calculate_ssim.tensor, _calculate_ssim.summary], feed_dict={_calculate_ssim.im_b: b})
+    # i is a single image
+    ssim_v, summary = tfsess.run([_calculate_ssim.tensor, _calculate_ssim.summary], feed_dict={_calculate_ssim.im_b: i})
     tf_log_writer.add_summary(summary, generation)
     return ssim_v
+
+
+def _calculate_inv_dist(tfsess, b):
+    # requires init_tensors first
+    # b is a batch of BATCH_SIZE images
+    diff_v, summary = tfsess.run([_calculate_inv_dist.tensor, _calculate_inv_dist.summary], feed_dict={_calculate_inv_dist.im_b: b})
+    tf_log_writer.add_summary(summary, generation)
+    return diff_v
 
 
 def sort_two_lists(a, b, reverse=False):
@@ -283,15 +303,18 @@ def train(tfsess, target_ssim=0.7, intermediate_path=None):
         # population_fitness = []
         for b in range(GENERATION_SIZE // BATCH_SIZE):
             image_batch = [population[i+b*BATCH_SIZE].render() for i in range(BATCH_SIZE)]
-            fitness_scores = _calculate_ssim(tfsess, image_batch)
+            fitness_scores = _calculate_inv_dist(tfsess, image_batch)
             for i in range(BATCH_SIZE):
                 population[i+b*BATCH_SIZE].fitness = fitness_scores[i]
             del image_batch, fitness_scores
 
-        if intermediate_path:
-            imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(population[0].render() * 256))
-
         population.sort(reverse=True)
+        image_of_champ = population[0].render(render_to_window=not HIDDEN_RENDER)
+        _calculate_ssim(tfsess, image_of_champ)  # for logging to tensorboard
+
+        if intermediate_path and generation % 10 == 0:
+            imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(image_of_champ * 256.0))
+
         print("Gen {}; Best: {}.".format(generation, population[0].fitness))
 
         # check if we have reached our target_loss
@@ -302,59 +325,68 @@ def train(tfsess, target_ssim=0.7, intermediate_path=None):
 
         # drop the lowest pops
         population = population[:GENERATION_CARRYOVER]
+        new_population = copy(population[:GENERATION_CARRYOVER//5])  # keep the top performers as they were to prevent information loss
+
 
         # duplicate the top members to fill the gap
-        n_babies = GENERATION_SIZE - GENERATION_CARRYOVER
+        n_babies = GENERATION_SIZE - GENERATION_CARRYOVER//5
         while n_babies > 0:
             i, j = random.randint(0, GENERATION_CARRYOVER, 2)
             if i == j:
                 continue
-            elif population[i] % population[j] < MAX_DISTANCE_FOR_BREEDING or random.rand() < INTERSPECIES_BREEDING_RATE:
+            elif population[i] % population[j] < MAX_DISTANCE_FOR_BREEDING:
                 child = population[i] @ population[j]
             elif random.rand() < 0.2:  # trapdoor to prevent a forever loop if few or none can breed with each-other
                 child = deepcopy(population[i])
             else:  # try a new pair
                 continue
 
-            child.mutate()
-            population.append(child)
+            new_population.append(child)
             n_babies -= 1
 
         # randomly mutate all individuals
-        for i in population[GENERATION_CARRYOVER:]:
+        for i in new_population[GENERATION_CARRYOVER//5:]:
             i.mutate()
 
+        population = new_population
         generation += 1
 
     return population[0]
 
 
+def tensor_summaries(tensor):
+    with tf.name_scope('summaries'):
+        mean = tf.reduce_mean(tensor)
+
+        with tf.name_scope('stddev'):
+            stddev = tf.sqrt(tf.reduce_mean(tf.square(tensor - mean)))
+
+        max = tf.reduce_max(tensor)
+        min = tf.reduce_min(tensor)
+        mean_s = tf.summary.scalar('mean', mean)
+        stddev_s = tf.summary.scalar('stddev', stddev)
+        max_s = tf.summary.scalar('max', max)
+        min_s = tf.summary.scalar('min', min)
+        hs = tf.summary.histogram('values', tensor)
+        return tf.summary.merge([mean_s, stddev_s, max_s, min_s, hs])
+
+
 def init_tensors(tfsess, image):
     with tf.name_scope('base_image'):
-        _calculate_ssim.im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
-        im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
+        im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
+        _calculate_ssim.im_a = im_a
+        _calculate_inv_dist.im_a = im_a
+
+        # im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
     with tf.name_scope('input_images'):
-        _calculate_ssim.im_b = tf.placeholder(np.float32, shape=(BATCH_SIZE, resolution[1], resolution[0], 3))
-        im_b = tf.cast(_calculate_ssim.im_b, np.float32)
+        _calculate_ssim.im_b = tf.placeholder(np.float32, shape=(resolution[1], resolution[0], 3))
+        _calculate_inv_dist.im_b = tf.placeholder(np.float32, shape=(BATCH_SIZE, resolution[1], resolution[0], 3))
     with tf.name_scope('ssim'):
-        _calculate_ssim.tensor = tf.image.ssim(im_a, im_b, 1.0)
-
-        with tf.name_scope('summaries'):
-            ssim = _calculate_ssim.tensor
-            mean = tf.reduce_mean(ssim)
-
-            with tf.name_scope('stddev'):
-                stddev = tf.sqrt(tf.reduce_mean(tf.square(ssim - mean)))
-
-            max = tf.reduce_max(ssim)
-            min = tf.reduce_min(ssim)
-            mean_s = tf.summary.scalar('mean', mean)
-            stddev_s = tf.summary.scalar('stddev', stddev)
-            max_s = tf.summary.scalar('max', max)
-            min_s = tf.summary.scalar('min', min)
-            ssim_hs = tf.summary.histogram('ssim', ssim)
-
-    _calculate_ssim.summary = tf.summary.merge([mean_s, stddev_s, max_s, min_s, ssim_hs])
+        _calculate_ssim.tensor = tf.image.ssim(im_a, tf.reshape(_calculate_ssim.im_b, (1, resolution[1], resolution[0], 3)), 1.0)[0]
+        _calculate_ssim.summary = tf.summary.scalar('ssim_v', _calculate_ssim.tensor)
+    with tf.name_scope('inv_dist'):
+        _calculate_inv_dist.tensor = 1.0 / tf.linalg.norm(tf.reshape(im_a - _calculate_inv_dist.im_b, (BATCH_SIZE, -1)), axis=1)
+        _calculate_inv_dist.summary = tensor_summaries(_calculate_inv_dist.tensor)
 
     global tf_log_writer
     tf_log_writer = tf.summary.FileWriter('./log/{}'.format(datetime.now()), tfsess.graph)
@@ -365,7 +397,7 @@ def main(photo, output, target_ssim=0.7, save_intermediate=False):
     image = imageio.imread(photo)
     resolution = (image.shape[1], image.shape[0]) # because we store in Row-major order
 
-    renderer = Renderer(resolution)
+    renderer = Renderer(resolution, hidden=HIDDEN_RENDER)
 
     with tf.Session() as sess:
         init_tensors(sess, image)
