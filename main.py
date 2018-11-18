@@ -12,24 +12,29 @@ from copy import deepcopy, copy
 import argparse
 
 MAX_GENERATIONS = 100000
-GENERATION_SIZE = 100
-BATCH_SIZE = GENERATION_SIZE  # decrease this if memory is tight, must divide GENERATION_SIZE evenly
+GENERATION_SIZE = 200
+SPECIES_COUNT = 5  # must evenly divide generation size
+SPECIES_SIZE = GENERATION_SIZE // SPECIES_COUNT
+SPECIES_NON_IMPROV_DEATH = 10  # kill a species if after x generations it has made no improvements
+SPECIES_CARRYOVER = int(SPECIES_SIZE * 0.4)  # the percentage which become parents
+CROSSOVER_AVERAGING_RATE = 0.2
+
 INIT_AVERAGE_TRIANGLES = 5
-GENERATION_CARRYOVER = int(GENERATION_SIZE * 0.2)
 
 DIST_MATCHING_DIFF_COST = 0.4
 DIST_EXCESS_COST = 1.0
 DIST_DISJOINT_COST = 1.0
-MAX_DISTANCE_FOR_BREEDING = 0.7
 
-PROB_DEL_TRI = 0.20  # chance any triangle is deleted
-PROB_ADD_TRI = 0.10  # change a random triangle is added
+PROB_MUTATE_INDV = 0.90  # chance an individual will be mutated (not guaranteed to be changed)
+PROB_DEL_TRI = 0.25  # chance any triangle is deleted
+PROB_ADD_TRI = 0.20  # change a random triangle is added
+MAX_TRIANGLE_FACTOR = 0.05  # Allow no more more than x*num_pixels triangles
 
-PROB_MUT_TRI = 0.10  # chance each triangle is mutated
-MUT_TRI_VERT_MEAN = 0.02  # on average, move x*resolution
+PROB_MUT_TRI = 0.9  # chance a triangle is mutated
+MUT_TRI_VERT_MEAN = 0.08  # on average, move x*resolution
 MUT_TRI_COLOR_MEAN = 8.0  # on average, change each color channel by x
 
-PROB_ALTER_ORDERING = 0.001  # chance any two triangles are swapped thus changing render order
+PROB_ALTER_ORDERING = 0.04  # chance any two triangles are swapped thus changing render order
 
 HIDDEN_RENDER=False
 
@@ -37,6 +42,112 @@ random.seed()
 
 generation = 0
 resolution = (0, 0)
+
+
+class Species(list):
+    # a list of individuals
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.fitness = 0
+        self.last_improvement = 0
+        self.id = Species.next_species_id
+        Species.next_species_id += 1
+
+    @staticmethod
+    def generate(species_size, avg_triangles):
+        # by mutating a single individual to comprise the whole group, they are actually related genetically which only
+        # makes sense given we want to cross similar genetics
+        alpha = Individual.generate(np.random.randint(min(1, avg_triangles // 2), avg_triangles * 2))
+        s = Species([alpha])
+        for _ in range(species_size - 1):
+            beta = deepcopy(alpha)
+            beta.mutate()
+            s.append(beta)
+        return s
+
+    def evaluate(self, tfsess):
+        images = [i.render() for i in self]
+        fitness_scores = _calculate_inv_dist(tfsess, images)
+        for i in range(len(self)):
+            self[i].fitness = fitness_scores[i]
+
+        self.sort(reverse=True)
+        if self[0].fitness > self.fitness:
+            self.fitness = self[0].fitness
+            self.last_improvement = generation
+
+    def next_generation(self):
+        # drop the lowest pops
+        parents = self[:SPECIES_CARRYOVER]
+        self.clear()
+        self._fill_niche(parents)
+
+    def split_species(self):
+        # randomly choose two new alphas and then fill out their respective species
+        i, j = 0, 0
+        while i == j:
+            i, j = random.randint(0, len(self), 2)
+
+        # distance from all members to the alphas
+        a_dist = [self[i] % m for m in self]
+        b_dist = [self[j] % m for m in self]
+
+        b = Species()
+        for i, (ad, bd) in enumerate(zip(a_dist, b_dist)):
+            if i == j or ad > bd:
+                t = self[i - len(b)]  # i - len(b) to offset by the number of removed elements
+                del self[i - len(b)]
+                b.append(t)
+            if ad <= bd:
+                # stays in self
+                continue
+
+        self.id = Species.next_species_id
+        Species.next_species_id += 1
+        self.fitness = self[0].fitness
+        self.last_improvement = generation
+        self._fill_niche(self)
+
+        b.fitness = b[0].fitness
+        b.last_improvement = generation
+        b._fill_niche(b)
+
+        return b
+
+    def _fill_niche(self, parents):
+        n_babies = SPECIES_SIZE - len(self)
+        assert len(parents) > 0
+        if len(parents) == 1:
+            parents = [parents[0], deepcopy(parents[0])]
+            parents[1].mutate()
+
+        while n_babies > 0:
+            i, j = random.randint(0, len(parents), 2)
+            if i == j:
+                continue
+            else:
+                child = parents[i] @ parents[j]
+                if random.rand() < PROB_MUTATE_INDV:
+                    child.mutate()
+                self.append(child)
+                n_babies -= 1
+
+    def __lt__(self, other):
+        return self.fitness < other.fitness
+
+    def __le__(self, other):
+        return self.fitness <= other.fitness
+
+    def __gt__(self, other):
+        return self.fitness > other.fitness
+
+    def __ge__(self, other):
+        return self.fitness >= other.fitness
+
+    def __eq__(self, other):
+        return self.fitness == other.fitness
+
+Species.next_species_id = 1
 
 
 class Individual:
@@ -70,7 +181,7 @@ class Individual:
         return Individual(tl, cl, ids)
 
     @staticmethod
-    def cross(a, b, average=False):
+    def cross(a, b):
         """
         Cross the genomes of two parents to create a child. This will take the disjoint and excess genes from the most
         fit parent and randomly choose between the matching ones.
@@ -83,6 +194,8 @@ class Individual:
         :param average: If enabled, then matching gens are averaged instaed of randomly selected.
         :return: A child which is the result of crossing the individuals.
         """
+        average = random.rand() < CROSSOVER_AVERAGING_RATE
+
         if a < b:  # a should be the most fit individual
             a, b = b, a
 
@@ -181,30 +294,32 @@ class Individual:
         # 3) shift a point of a triangle
         # 4) add a triangle
         # 5) swap two triangles (which one renders over the others)
-        while len(self) > 1 and random.rand() < PROB_DEL_TRI:
+        if len(self) > 1 and random.rand() < PROB_DEL_TRI:
             choice = random.randint(0, len(self))
             del self[choice]
 
-        for i in range(len(self)):
-            if random.rand() < PROB_MUT_TRI:
-                v = random.randint(0, 3)
-                self.triangles[i][v, 0] = \
-                    (self.triangles[i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0])\
-                    .clip(0, resolution[0])
-                self.triangles[i][v, 1] = \
-                    (self.triangles[i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1])\
-                    .clip(0, resolution[1])
+        if random.rand() < PROB_MUT_TRI:
+            i = random.randint(0, len(self))
+            v = random.randint(0, 3)
+            self.triangles[i][v, 0] = \
+                (self.triangles[i][v, 0] + random.randn() * MUT_TRI_VERT_MEAN * resolution[0])\
+                .clip(0, resolution[0])
+            self.triangles[i][v, 1] = \
+                (self.triangles[i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1])\
+                .clip(0, resolution[1])
 
-            if random.rand() < PROB_MUT_TRI:
-                c = random.randint(0, 4)
-                self.colors[i][c] = np.uint8((self.colors[i][c] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 256))
+        if random.rand() < PROB_MUT_TRI:
+            i = random.randint(0, len(self))
+            c = random.randint(0, 4)
+            self.colors[i][c] = np.uint8((self.colors[i][c] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 256))
 
-        while random.rand() < PROB_ADD_TRI:
+        max_triangles = MAX_TRIANGLE_FACTOR*resolution[0]*resolution[1]
+        if len(self) < max_triangles and random.rand() < PROB_ADD_TRI:
             v, c = randomly_generate_triangle()
             self.append((v, c, Individual.next_trait_id))
             Individual.next_trait_id += 1
 
-        while len(self) > 1 and random.rand() < PROB_ALTER_ORDERING:
+        if len(self) > 1 and random.rand() < PROB_ALTER_ORDERING:
             i = random.randint(0, len(self) - 1)
             self[i], self[i+1] = self[i+1], self[i]
 
@@ -257,19 +372,16 @@ Individual.next_trait_id = 1
 
 
 def randomly_generate_triangle(transparent=False):
-    verts = np.int32(random.rand(3, 2) * resolution)
+    A = np.int32(random.rand(2) * resolution)
+    B = A + random.randn(2) * MUT_TRI_VERT_MEAN
+    C = B + random.randn(2) * MUT_TRI_VERT_MEAN
+    verts = np.int32([A, B, C])
+
     colors = np.uint8(random.rand(4) * 256)
     if transparent:
         return verts, colors * [1,1,1,0]
     else:
         return verts, colors
-
-
-def randomly_generate_population(pop_size, avg_triangles):
-    return [
-        Individual.generate(np.random.randint(min(1, avg_triangles // 2), avg_triangles * 2))
-        for _ in range(pop_size)
-    ]
 
 
 def _calculate_ssim(tfsess, i):
@@ -282,40 +394,48 @@ def _calculate_ssim(tfsess, i):
 
 def _calculate_inv_dist(tfsess, b):
     # requires init_tensors first
-    # b is a batch of BATCH_SIZE images
+    # b is a batch of SPECIES_COUNT images
     diff_v, summary = tfsess.run([_calculate_inv_dist.tensor, _calculate_inv_dist.summary], feed_dict={_calculate_inv_dist.im_b: b})
     tf_log_writer.add_summary(summary, generation)
     return diff_v
 
 
-def sort_two_lists(a, b, reverse=False):
-    assert len(a) == len(b)
-    indexes = list(range(len(a)))
-    indexes.sort(key=a.__getitem__, reverse=reverse)
-    return list(map(a.__getitem__, indexes)), list(map(b.__getitem__, indexes))
-
-
-def train(tfsess, target_ssim=0.7, intermediate_path=None):
+def simulate(tfsess, target_ssim=0.7, intermediate_path=None):
     global generation
-    population = randomly_generate_population(GENERATION_SIZE, INIT_AVERAGE_TRIANGLES)
+    population = [Species.generate(SPECIES_SIZE, INIT_AVERAGE_TRIANGLES) for _ in range(SPECIES_COUNT)]
     generation = 0
-    while True:
-        # population_fitness = []
-        for b in range(GENERATION_SIZE // BATCH_SIZE):
-            image_batch = [population[i+b*BATCH_SIZE].render() for i in range(BATCH_SIZE)]
-            fitness_scores = _calculate_inv_dist(tfsess, image_batch)
-            for i in range(BATCH_SIZE):
-                population[i+b*BATCH_SIZE].fitness = fitness_scores[i]
-            del image_batch, fitness_scores
+    top_species = 0
 
+    while True:
+        for s in population:
+            s.evaluate(tfsess)
         population.sort(reverse=True)
-        image_of_champ = population[0].render(render_to_window=not HIDDEN_RENDER)
+        if type(top_species) == set:
+            # resolve the tuple type now that we know how they did.
+            if population[0].id in top_species:
+                top_species = population[0].id
+            else:
+                top_species = top_species.pop()
+        if top_species != population[0].id:
+            if top_species != 0:
+                print("Species {} has overtaken {}!".format(population[0].id, top_species))
+            top_species = population[0].id
+            top_species_max_non_improv = SPECIES_NON_IMPROV_DEATH
+        else:
+            top_species_max_non_improv = max(generation - population[0].last_improvement, top_species_max_non_improv)
+
+        image_of_champ = population[0][0].render(render_to_window=not HIDDEN_RENDER)
         _calculate_ssim(tfsess, image_of_champ)  # for logging to tensorboard
 
         if intermediate_path and generation % 10 == 0:
             imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(image_of_champ * 256.0))
 
-        print("Gen {}; Best: {}.".format(generation, population[0].fitness))
+        print("Gen {}; Improvements: {}; Species Fitness: {}; Tricount: {}.".format(
+            generation,
+            sum([s.last_improvement == generation for s in population]),
+            [(s.id, s.fitness) for s in population],
+            len(population[0][0])
+        ))
 
         # check if we have reached our target_loss
         if generation >= MAX_GENERATIONS:
@@ -323,35 +443,28 @@ def train(tfsess, target_ssim=0.7, intermediate_path=None):
         elif population[0].fitness >= target_ssim:
             break
 
-        # drop the lowest pops
-        population = population[:GENERATION_CARRYOVER]
-        new_population = copy(population[:GENERATION_CARRYOVER//5])  # keep the top performers as they were to prevent information loss
+        for s in population:
+            s.next_generation()
 
-
-        # duplicate the top members to fill the gap
-        n_babies = GENERATION_SIZE - GENERATION_CARRYOVER//5
-        while n_babies > 0:
-            i, j = random.randint(0, GENERATION_CARRYOVER, 2)
-            if i == j:
-                continue
-            elif population[i] % population[j] < MAX_DISTANCE_FOR_BREEDING:
-                child = population[i] @ population[j]
-            elif random.rand() < 0.2:  # trapdoor to prevent a forever loop if few or none can breed with each-other
-                child = deepcopy(population[i])
-            else:  # try a new pair
-                continue
-
-            new_population.append(child)
-            n_babies -= 1
-
-        # randomly mutate all individuals
-        for i in new_population[GENERATION_CARRYOVER//5:]:
-            i.mutate()
-
+        new_population = [population[0]]  # don't allow best species to die
+        new_population.extend(filter(lambda s: generation - s.last_improvement <= top_species_max_non_improv, population[1:]))
+        if len(new_population) == 0:
+            print("All species have died simultaneously.")
+            return population[0]
         population = new_population
-        generation += 1
+        survivors = len(population)
+        while len(population) < SPECIES_COUNT:
+            i = random.randint(0, survivors)
+            population.append(population[i].split_species())
+            if i == 0:
+                # need to update our top species id to reflect this, so list both options for now
+                if type(top_species) == int:
+                    top_species = {population[0].id, population[-1].id}
+                else:
+                    top_species = top_species | {population[0].id, population[-1].id}
 
-    return population[0]
+        generation += 1
+    return population[0][0]
 
 
 def tensor_summaries(tensor):
@@ -376,16 +489,14 @@ def init_tensors(tfsess, image):
         im_a = tf.constant(np.float32(image).reshape(1, resolution[1], resolution[0], 3) / 256.0)
         _calculate_ssim.im_a = im_a
         _calculate_inv_dist.im_a = im_a
-
-        # im_a = tf.tile(_calculate_ssim.im_a, (BATCH_SIZE, 1, 1, 1))
     with tf.name_scope('input_images'):
         _calculate_ssim.im_b = tf.placeholder(np.float32, shape=(resolution[1], resolution[0], 3))
-        _calculate_inv_dist.im_b = tf.placeholder(np.float32, shape=(BATCH_SIZE, resolution[1], resolution[0], 3))
+        _calculate_inv_dist.im_b = tf.placeholder(np.float32, shape=(SPECIES_SIZE, resolution[1], resolution[0], 3))
     with tf.name_scope('ssim'):
         _calculate_ssim.tensor = tf.image.ssim(im_a, tf.reshape(_calculate_ssim.im_b, (1, resolution[1], resolution[0], 3)), 1.0)[0]
         _calculate_ssim.summary = tf.summary.scalar('ssim_v', _calculate_ssim.tensor)
     with tf.name_scope('inv_dist'):
-        _calculate_inv_dist.tensor = 1.0 / tf.linalg.norm(tf.reshape(im_a - _calculate_inv_dist.im_b, (BATCH_SIZE, -1)), axis=1)
+        _calculate_inv_dist.tensor = 1.0 / tf.linalg.norm(tf.reshape(im_a - _calculate_inv_dist.im_b, (SPECIES_SIZE, -1)), axis=1)
         _calculate_inv_dist.summary = tensor_summaries(_calculate_inv_dist.tensor)
 
     global tf_log_writer
@@ -395,13 +506,13 @@ def init_tensors(tfsess, image):
 def main(photo, output, target_ssim=0.7, save_intermediate=False):
     global resolution
     image = imageio.imread(photo)
-    resolution = (image.shape[1], image.shape[0]) # because we store in Row-major order
+    resolution = np.int32([image.shape[1], image.shape[0]]) # because we store in Row-major order
 
     renderer = Renderer(resolution, hidden=HIDDEN_RENDER)
 
     with tf.Session() as sess:
         init_tensors(sess, image)
-        best_indv = train(sess, target_ssim=target_ssim, intermediate_path=output if save_intermediate else None)
+        best_indv = simulate(sess, target_ssim=target_ssim, intermediate_path=output if save_intermediate else None)
         imageio.imwrite('{}/final.png'.format(output), np.uint8(best_indv.render() * 256.0))
 
 
