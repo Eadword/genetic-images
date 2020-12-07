@@ -3,7 +3,7 @@ from render import Renderer
 
 import numpy as np
 import numpy.random as random
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from datetime import datetime
 import imageio
@@ -11,12 +11,13 @@ import sys
 from copy import deepcopy, copy
 import argparse
 
-MAX_GENERATIONS = 100000
-GENERATION_SIZE = 200
-SPECIES_COUNT = 5  # must evenly divide generation size
+MAX_GENERATIONS = 1000000
+GENERATION_SIZE = 60
+SPECIES_COUNT = 1  # must evenly divide generation size
 SPECIES_SIZE = GENERATION_SIZE // SPECIES_COUNT
 SPECIES_NON_IMPROV_DEATH = 10  # kill a species if after x generations it has made no improvements
 SPECIES_CARRYOVER = int(SPECIES_SIZE * 0.4)  # the percentage which become parents
+KEEP_SPECIES_BEST = True # if true, keep the best of each species unaltered
 CROSSOVER_AVERAGING_RATE = 0.2
 
 INIT_AVERAGE_TRIANGLES = 5
@@ -25,16 +26,16 @@ DIST_MATCHING_DIFF_COST = 0.4
 DIST_EXCESS_COST = 1.0
 DIST_DISJOINT_COST = 1.0
 
-PROB_MUTATE_INDV = 0.90  # chance an individual will be mutated (not guaranteed to be changed)
-PROB_DEL_TRI = 0.25  # chance any triangle is deleted
-PROB_ADD_TRI = 0.20  # change a random triangle is added
-MAX_TRIANGLE_FACTOR = 0.05  # Allow no more more than x*num_pixels triangles
+PROB_MUTATE_INDV = 0.70  # chance an individual will be mutated (not guaranteed to be changed)
+PROB_DEL_TRI = 0.105  # chance any triangle is deleted
+PROB_ADD_TRI = 0.10  # change a random triangle is added
+MAX_TRIANGLE_FACTOR = 0.02  # Allow no more more than x*num_pixels triangles
 
-PROB_MUT_TRI = 0.9  # chance a triangle is mutated
-MUT_TRI_VERT_MEAN = 0.08  # on average, move x*resolution
-MUT_TRI_COLOR_MEAN = 8.0  # on average, change each color channel by x
+PROB_MUT_TRI = 0.6  # chance a triangle is mutated
+MUT_TRI_VERT_MEAN = 0.02  # on average, move x*resolution
+MUT_TRI_COLOR_MEAN = 6.0  # on average, change each color channel by x
 
-PROB_ALTER_ORDERING = 0.04  # chance any two triangles are swapped thus changing render order
+PROB_ALTER_ORDERING = 0.30  # chance any two triangles are swapped thus changing render order
 
 HIDDEN_RENDER=False
 
@@ -79,7 +80,12 @@ class Species(list):
     def next_generation(self):
         # drop the lowest pops
         parents = self[:SPECIES_CARRYOVER]
-        self.clear()
+        if KEEP_SPECIES_BEST:
+            best = self[0]
+            self.clear()
+            self.append(best)
+        else:
+            self.clear()
         self._fill_niche(parents)
 
     def split_species(self):
@@ -124,13 +130,14 @@ class Species(list):
         while n_babies > 0:
             i, j = random.randint(0, len(parents), 2)
             if i == j:
-                continue
+                child = parents[i]
+                child.mutate()
             else:
                 child = parents[i] @ parents[j]
                 if random.rand() < PROB_MUTATE_INDV:
                     child.mutate()
-                self.append(child)
-                n_babies -= 1
+            self.append(child)
+            n_babies -= 1
 
     def __lt__(self, other):
         return self.fitness < other.fitness
@@ -294,11 +301,11 @@ class Individual:
         # 3) shift a point of a triangle
         # 4) add a triangle
         # 5) swap two triangles (which one renders over the others)
-        if len(self) > 1 and random.rand() < PROB_DEL_TRI:
+        while len(self) > 1 and random.rand() < PROB_DEL_TRI:
             choice = random.randint(0, len(self))
             del self[choice]
 
-        if random.rand() < PROB_MUT_TRI:
+        while random.rand() < PROB_MUT_TRI:
             i = random.randint(0, len(self))
             v = random.randint(0, 3)
             self.triangles[i][v, 0] = \
@@ -308,18 +315,18 @@ class Individual:
                 (self.triangles[i][v, 1] + random.randn() * MUT_TRI_VERT_MEAN * resolution[1])\
                 .clip(0, resolution[1])
 
-        if random.rand() < PROB_MUT_TRI:
+        while random.rand() < PROB_MUT_TRI:
             i = random.randint(0, len(self))
             c = random.randint(0, 4)
             self.colors[i][c] = np.uint8((self.colors[i][c] + random.randn() * MUT_TRI_COLOR_MEAN).clip(0, 256))
 
         max_triangles = MAX_TRIANGLE_FACTOR*resolution[0]*resolution[1]
-        if len(self) < max_triangles and random.rand() < PROB_ADD_TRI:
+        while len(self) < max_triangles and random.rand() < PROB_ADD_TRI:
             v, c = randomly_generate_triangle()
             self.append((v, c, Individual.next_trait_id))
             Individual.next_trait_id += 1
 
-        if len(self) > 1 and random.rand() < PROB_ALTER_ORDERING:
+        while len(self) > 1 and random.rand() < PROB_ALTER_ORDERING:
             i = random.randint(0, len(self) - 1)
             self[i], self[i+1] = self[i+1], self[i]
 
@@ -405,6 +412,7 @@ def simulate(tfsess, target_ssim=0.7, intermediate_path=None):
     population = [Species.generate(SPECIES_SIZE, INIT_AVERAGE_TRIANGLES) for _ in range(SPECIES_COUNT)]
     generation = 0
     top_species = 0
+    last_save_at_fitness = 0
 
     while True:
         for s in population:
@@ -427,13 +435,15 @@ def simulate(tfsess, target_ssim=0.7, intermediate_path=None):
         image_of_champ = population[0][0].render(render_to_window=not HIDDEN_RENDER)
         _calculate_ssim(tfsess, image_of_champ)  # for logging to tensorboard
 
-        if intermediate_path and generation % 10 == 0:
+        if intermediate_path and population[0].fitness > last_save_at_fitness * 1.01:
+            # if the best image is at least 1% better than the last time we saved it, write it to disk
+            last_save_at_fitness = population[0].fitness
             imageio.imwrite('{}/gen{}.png'.format(intermediate_path, generation), np.uint8(image_of_champ * 256.0))
 
         print("Gen {}; Improvements: {}; Species Fitness: {}; Tricount: {}.".format(
             generation,
             sum([s.last_improvement == generation for s in population]),
-            [(s.id, s.fitness) for s in population],
+            [(s.id, "{:.8f}".format(s.fitness)) for s in population],
             len(population[0][0])
         ))
 
@@ -521,4 +531,4 @@ if __name__ == '__main__':
     # parser.add_argument("source", metavar='src', type=str, help="source image")
     # parser.add_argument("output", metavar='dst', type=str, help="output destination")
     # parser.add_argument()
-    main(sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4] in ['True', 'False'])
+    main(sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4] in ['True', 'true'])
